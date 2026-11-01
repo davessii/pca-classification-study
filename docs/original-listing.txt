@@ -1,0 +1,438 @@
+Листинг Б.1 — Блок 1. Импорт и предобработка данных
+
+import pandas as pd
+import numpy as np
+import seaborn as sns
+import matplotlib.pyplot as plt
+import datetime
+import time
+from sklearn.preprocessing import StandardScaler, LabelEncoder
+from sklearn.decomposition import PCA
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import classification_report, confusion_matrix
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.manifold import TSNE
+from sklearn.utils.class_weight import compute_class_weight
+import torch
+import torch.nn as nn
+import torch.optim as optim
+df = pd.read_csv('Customer_Data.csv')
+print(df.head())
+
+drop_columns = ["Customer_ID", "Geographical_ID", "Unnamed: 11", "Unnamed: 12", "Old_Class"]
+df.drop(drop_columns, axis=1, inplace=True)
+
+label_encoder = LabelEncoder()
+df['Customer_Status'] = label_encoder.fit_transform(df['Customer_Status'])
+
+df.dropna(inplace=True)
+df = df[(df["Net_ Purchase(IRR)"] >= 0) & (df["Waste_Rate"] >= 0) & (df["Rejected_Rate"] >= 0)]
+
+df['CustCreationDate'] = pd.to_datetime(df['CustCreationDate'])
+df['Date_Of_Last_ Purchase'] = pd.to_datetime(df['Date_Of_Last_ Purchase'])
+df["recency"] = (datetime.datetime.now() - df["Date_Of_Last_ Purchase"]).dt.days
+df['age'] = (datetime.datetime.now() - df['CustCreationDate']).dt.days
+df.drop(["Date_Of_Last_ Purchase", "CustCreationDate"], axis=1, inplace=True)
+
+X = df.drop(['Customer_Status'], axis=1)
+y = df['Customer_Status']
+num_features = X.shape[1]
+num_rows = df.shape[0]
+num_classes = y.nunique()
+
+print(f"В датасете {num_rows} строк, {num_features} признаков и {num_classes} класса(ов).")
+
+missing_values = df.isnull().sum().sum()
+print(f"Количество пропущенных значений в датасете: {missing_values}")
+
+print(f"Количество отрицательных значений в 'Net_ Purchase(IRR)': {(df['Net_ Purchase(IRR)'] < 0).sum()}")
+print(f"Количество отрицательных значений в 'Waste_Rate': {(df['Waste_Rate'] < 0).sum()}")
+print(f"Количество отрицательных значений в 'Rejected_Rate': {(df['Rejected_Rate'] < 0).sum()}")
+
+print("Категориальные признаки были закодированы с помощью LabelEncoder.")
+sns.countplot(x=y)
+plt.title("Распределение классов в выборке")
+plt.xlabel("Класс")
+plt.ylabel("Количество объектов")
+plt.show()
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
+
+scaler = StandardScaler()
+X_train_scaled = scaler.fit_transform(X_train)
+X_test_scaled = scaler.transform(X_test)
+
+Листинг Б.2 — Блок 2. PCA и визуализация компонент
+
+pca_full = PCA().fit(X_train_scaled)
+
+plt.figure(figsize=(10, 6))
+plt.plot(np.cumsum(pca_full.explained_variance_ratio_), marker='o')
+plt.axhline(y=0.95, color='r', linestyle='--', label='95% дисперсии')
+plt.xlabel('Количество компонент')
+plt.ylabel('Накопленная объяснённая дисперсия')
+plt.title('Объяснённая дисперсия PCA')
+plt.legend()
+plt.grid()
+plt.show()
+optimal_n = np.argmax(np.cumsum(pca_full.explained_variance_ratio_) >= 0.95) + 1
+
+print(f"\nОптимальное число компонент (95% дисперсии): {optimal_n}")
+pca = PCA(n_components=optimal_n)
+X_train_pca = pca.fit_transform(X_train_scaled)
+X_test_pca = pca.transform(X_test_scaled)
+
+Листинг Б.3 — Блок 3. t-SNE, вклад признаков, стандартные графики
+
+tsne = TSNE(n_components=2, random_state=42, perplexity=30)
+X_tsne = tsne.fit_transform(X_train_scaled)
+plt.figure(figsize=(12, 5))
+plt.subplot(1, 2, 1)
+sns.scatterplot(x=X_train_pca[:, 0], y=X_train_pca[:, 1], hue=y_train, palette='tab10')
+plt.title('PCA проекция')
+
+plt.subplot(1, 2, 2)
+sns.scatterplot(x=X_tsne[:, 0], y=X_tsne[:, 1], hue=y_train, palette='tab10')
+plt.title('t-SNE проекция')
+plt.tight_layout()
+plt.show()
+
+plt.figure(figsize=(15, 5))
+plt.subplot(1, 3, 1)
+sns.heatmap(pca.components_[:3], 
+     cmap='coolwarm',
+     yticklabels=[f"PC{i+1}" for i in range(3)],
+     xticklabels=X.columns,
+     annot=True, fmt=".2f")
+plt.title('Вклад признаков в первые 3 компоненты')
+
+
+plt.subplot(1, 3, 2)
+plt.bar(range(1, optimal_n+1), pca.explained_variance_ratio_[:optimal_n])
+plt.xlabel('Номер компоненты')
+plt.ylabel('Доля объяснённой дисперсии')
+plt.title('Вклад каждой компоненты')
+plt.tight_layout()
+plt.show()
+
+Листинг Б.4 — Блок 4. Нейросеть без PCA
+
+X_train_tensor = torch.tensor(X_train_scaled, dtype=torch.float32)
+X_test_tensor = torch.tensor(X_test_scaled, dtype=torch.float32)
+y_train_tensor = torch.tensor(y_train.values, dtype=torch.long)
+y_test_tensor = torch.tensor(y_test.values, dtype=torch.long)
+
+
+class_weights = compute_class_weight(class_weight='balanced', classes=np.unique(y_train), y=y_train)
+class_weights_tensor = torch.tensor(class_weights, dtype=torch.float32)
+
+num_classes = len(np.unique(y_train))
+
+
+class NeuralNetwork(nn.Module):
+    def __init__(self, input_size, hidden_size, output_size, dropout_rate=0.3):
+ super().__init__()
+ self.fc1 = nn.Linear(input_size, hidden_size)
+ self.bn1 = nn.BatchNorm1d(hidden_size)
+ self.dropout = nn.Dropout(dropout_rate)
+ self.fc2 = nn.Linear(hidden_size, output_size)
+
+    def forward(self, x):
+ x = self.fc1(x)
+ x = self.bn1(x)
+ x = torch.relu(x)
+ x = self.dropout(x)
+ x = self.fc2(x)
+ return x
+
+model_no_pca = NeuralNetwork(input_size=X_train_scaled.shape[1], hidden_size=16, output_size=num_classes, dropout_rate=0.2)
+criterion = nn.CrossEntropyLoss(weight=class_weights_tensor)
+optimizer = optim.Adam(model_no_pca.parameters(), lr=0.01, weight_decay=1e-4)
+
+train_losses_no_pca, val_losses_no_pca, train_acc_no_pca, val_acc_no_pca = [], [], [], []
+start_time_no_pca = time.time()
+
+
+for epoch in range(150):
+    model_no_pca.train()
+    optimizer.zero_grad()
+    outputs = model_no_pca(X_train_tensor)
+    loss = criterion(outputs, y_train_tensor)
+    loss.backward()
+    optimizer.step()
+
+    with torch.no_grad():
+ train_pred = torch.argmax(outputs, dim=1)
+ train_accuracy = (train_pred == y_train_tensor).float().mean()
+ model_no_pca.eval()
+ val_outputs = model_no_pca(X_test_tensor)
+ val_loss = criterion(val_outputs, y_test_tensor)
+ val_pred = torch.argmax(val_outputs, dim=1)
+ val_accuracy = (val_pred == y_test_tensor).float().mean()
+
+
+train_losses_no_pca.append(loss.item())
+    val_losses_no_pca.append(val_loss.item())
+    train_acc_no_pca.append(train_accuracy.item())
+    val_acc_no_pca.append(val_accuracy.item())
+
+    if (epoch + 1) % 20 == 0:
+ print(f'[No PCA] Epoch {epoch+1}, Loss: {loss.item():.4f}, Val Loss: {val_loss.item():.4f}, '
+f'Acc: {train_accuracy:.4f}, Val Acc: {val_accuracy:.4f}')
+end_time_no_pca = time.time()
+duration_no_pca = end_time_no_pca - start_time_no_pca
+print(f"\n⏱️ Время обучения нейросети без PCA: {duration_no_pca:.2f} секунд")
+
+Листинг Б.5 — Блок 5. Нейросеть с PCA
+
+X_train_tensor_pca = torch.tensor(X_train_pca, dtype=torch.float32)
+X_test_tensor_pca = torch.tensor(X_test_pca, dtype=torch.float32)
+
+model_pca = NeuralNetwork(input_size=optimal_n, hidden_size=16, output_size=num_classes, dropout_rate=0.2)
+criterion_pca = nn.CrossEntropyLoss(weight=class_weights_tensor)
+optimizer_pca = optim.Adam(model_pca.parameters(), lr=0.01, weight_decay=1e-4)
+
+train_losses_pca, val_losses_pca, train_acc_pca, val_acc_pca = [], [], [], []
+start_time_pca = time.time()
+for epoch in range(150):
+    model_pca.train()
+    optimizer_pca.zero_grad()
+    outputs = model_pca(X_train_tensor_pca)
+    loss = criterion_pca(outputs, y_train_tensor)
+    loss.backward()
+    optimizer_pca.step()
+
+    with torch.no_grad():
+ train_pred = torch.argmax(outputs, dim=1)
+ train_accuracy = (train_pred == y_train_tensor).float().mean()
+ model_pca.eval()
+ val_outputs = model_pca(X_test_tensor_pca)
+ val_loss = criterion_pca(val_outputs, y_test_tensor)
+ val_pred = torch.argmax(val_outputs, dim=1)
+ val_accuracy = (val_pred == y_test_tensor).float().mean()
+
+
+train_losses_pca.append(loss.item())
+    val_losses_pca.append(val_loss.item())
+    train_acc_pca.append(train_accuracy.item())
+    val_acc_pca.append(val_accuracy.item())
+
+
+
+f'Acc: {train_accuracy:.4f}, Val Acc: {val_accuracy:.4f}')
+end_time_pca = time.time()
+duration_pca = end_time_pca - start_time_pca
+print(f"\n⏱️ Время обучения нейросети с PCA: {duration_pca:.2f} секунд")
+
+Листинг Б.6 — Блок 6. Random Forest: GridSearch и обучение
+
+from sklearn.model_selection import GridSearchCV
+
+def grid_search_rf(X_train, y_train):
+    param_grid = {
+    'n_estimators': [100, 200],   
+    'max_depth': [5, 10, None],   
+    'min_samples_split': [2, 5],
+    'min_samples_leaf': [1, 2, 4]
+    }
+
+
+rf = RandomForestClassifier(random_state=42, n_jobs=-1)
+
+    grid_search = GridSearchCV(estimator=rf,
+   param_grid=param_grid,
+   scoring='f1_weighted',
+   cv=3,
+   verbose=2,
+   n_jobs=-1)
+
+    grid_search.fit(X_train, y_train)
+    print(f"Лучшие параметры: {grid_search.best_params_}")
+    print(f"Лучший F1 (weighted) на кросс-валидации: {grid_search.best_score_:.4f}")
+
+    return grid_search.best_estimator_
+
+print("Поиск параметров Random Forest без PCA:")
+start_rf_no_pca = time.time()
+best_rf_no_pca = grid_search_rf(X_train_scaled, y_train)  
+end_rf_no_pca = time.time()
+rf_no_pca_time = end_rf_no_pca - start_rf_no_pca
+print(f"\n⏱️ Время обучения Random Forest без PCA: {rf_no_pca_time:.2f} секунд")
+
+best_rf_no_pca.fit(X_train_scaled, y_train)
+
+
+
+print("\nПоиск параметров Random Forest с PCA:")
+start_rf_pca = time.time()
+best_rf_pca = grid_search_rf(X_train_pca, y_train)
+end_rf_pca = time.time()
+rf_pca_time = end_rf_pca - start_rf_pca
+print(f"\n⏱️ Время обучения Random Forest с PCA: {rf_pca_time:.2f} секунд")
+
+best_rf_pca.fit(X_train_pca, y_train)
+
+
+best_rf_no_pca.fit(X_train_scaled, y_train)
+best_rf_pca.fit(X_train_pca, y_train)
+
+y_pred_rf_best_no_pca = best_rf_no_pca.predict(X_test_scaled)
+y_pred_rf_best_pca = best_rf_pca.predict(X_test_pca)
+
+Листинг Б.7 — Блок 7. Оценка моделей и визуализация деревьев
+
+from sklearn.tree import plot_tree
+
+feature_names = list(X.columns)
+class_names = list(label_encoder.classes_)
+
+print("\nВизуализация отдельных деревьев из Random Forest (первые 3):")
+
+for i in range(3):
+    plt.figure(figsize=(20, 10))
+    plot_tree(
+ best_rf_no_pca.estimators_[i],
+ feature_names=feature_names,
+ class_names=class_names,
+ filled=True,
+ rounded=True,
+ max_depth=2
+    )
+    plt.title(f"Дерево №{i+1} из Random Forest (без PCA)")
+    plt.show()
+
+model_no_pca.eval()
+with torch.no_grad():
+    y_pred_nn_no_pca = model_no_pca(X_test_tensor)
+    y_pred_classes_nn_no_pca = torch.argmax(y_pred_nn_no_pca, axis=1).numpy()
+
+print("\nНейросеть без PCA — результаты:")
+print(classification_report(y_test, y_pred_classes_nn_no_pca, target_names=label_encoder.classes_))
+
+
+model_pca.eval()
+with torch.no_grad():
+    y_pred_nn_pca = model_pca(X_test_tensor_pca)
+    y_pred_classes_nn_pca = torch.argmax(y_pred_nn_pca, axis=1).numpy()
+
+print("\nНейросеть с PCA — результаты:")
+print(classification_report(y_test, y_pred_classes_nn_pca, target_names=label_encoder.classes_))
+
+print("\nRandom Forest без PCA (Best Estimator) — результаты:")
+print(classification_report(y_test, y_pred_rf_best_no_pca, target_names=label_encoder.classes_))
+
+print("\nRandom Forest с PCA (Best Estimator) — результаты:")
+print(classification_report(y_test, y_pred_rf_best_pca, target_names=label_encoder.classes_))
+
+Листинг Б.8 — Блок 8. Метрики моделей
+
+from sklearn.metrics import precision_score, recall_score, f1_score
+
+models = ['NN (No PCA)', 'NN (PCA)', 'RF (No PCA)', 'RF (PCA)']
+y_preds = [y_pred_classes_nn_no_pca, y_pred_classes_nn_pca,
+    y_pred_rf_best_no_pca, y_pred_rf_best_pca]
+
+f1s, precisions, recalls = [], [], []
+for y_pred in y_preds:
+    f1s.append(f1_score(y_test, y_pred, average='weighted'))
+    precisions.append(precision_score(y_test, y_pred, average='weighted'))
+    recalls.append(recall_score(y_test, y_pred, average='weighted'))
+
+x = np.arange(len(models))
+width = 0.25
+
+plt.figure(figsize=(10, 6))
+plt.bar(x - width, f1s, width, label='F1')
+plt.bar(x, precisions, width, label='Precision')
+plt.bar(x + width, recalls, width, label='Recall')
+plt.xticks(x, models)
+plt.ylabel('Значение метрики')
+plt.title('Сравнение метрик моделей')
+plt.legend()
+plt.grid(axis='y')
+plt.tight_layout()
+plt.show()
+
+Листинг Б.9 — Блок 9. Графики обучения
+
+plt.subplot(1, 2, 1)
+plt.plot(train_losses_no_pca, label='Train Loss (No PCA)')
+plt.plot(val_losses_no_pca, label='Val Loss (No PCA)')
+plt.plot(train_losses_pca, label='Train Loss (PCA)')
+plt.plot(val_losses_pca, label='Val Loss (PCA)')
+plt.title('Функция потерь')
+plt.xlabel('Эпоха')
+plt.ylabel('Loss')
+plt.legend()
+
+plt.subplot(1, 2, 2)
+plt.plot(train_acc_no_pca, label='Train Accuracy (No PCA)')
+plt.plot(val_acc_no_pca, label='Val Accuracy (No PCA)')
+plt.plot(train_acc_pca, label='Train Accuracy (PCA)')
+plt.plot(val_acc_pca, label='Val Accuracy (PCA)')
+
+plt.title('Точность')
+plt.xlabel('Эпоха')
+plt.ylabel('Accuracy')
+plt.legend()
+
+plt.tight_layout()
+plt.show()
+
+
+models = ['NN (No PCA)', 'NN (PCA)', 'RF (No PCA)', 'RF (PCA)']
+times = [duration_no_pca, duration_pca, rf_no_pca_time, rf_pca_time]
+
+plt.figure(figsize=(8, 5))
+bars = plt.bar(models, times, color=['skyblue', 'lightgreen', 'orange', 'salmon'])
+
+
+for bar in bars:
+    yval = bar.get_height()
+    plt.text(bar.get_x() + bar.get_width()/2.0, yval + 0.2, f'{yval:.2f} с', ha='center', va='bottom')
+
+plt.ylabel('Время обучения (сек)')
+plt.title('Сравнение времени обучения моделей')
+plt.grid(axis='y', linestyle='--', alpha=0.7)
+plt.tight_layout()
+plt.show()
+
+Листинг Б.10 — Блок 10. Матрицы ошибок
+
+fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+
+sns.heatmap(confusion_matrix(y_test, y_pred_classes_nn_no_pca), annot=True, fmt='d',
+     cmap='Blues', ax=axes[0, 0])
+axes[0, 0].set_title('Нейросеть без PCA')
+
+sns.heatmap(confusion_matrix(y_test, y_pred_classes_nn_pca), annot=True, fmt='d',
+     cmap='Greens', ax=axes[0, 1])
+axes[0, 1].set_title('Нейросеть с PCA')
+
+sns.heatmap(confusion_matrix(y_test, y_pred_rf_best_no_pca), annot=True, fmt='d',
+     cmap='Oranges', ax=axes[1, 0])
+axes[1, 0].set_title('Random Forest без PCA')
+
+
+sns.heatmap(confusion_matrix(y_test, y_pred_rf_best_pca), annot=True, fmt='d',
+     cmap='Purples', ax=axes[1, 1])
+axes[1, 1].set_title('Random Forest с PCA')
+
+plt.tight_layout()
+plt.show()
+
+Листинг Б.11 — Блок 11. ROC-кривые
+
+from sklearn.metrics import roc_curve, auc
+import torch.nn.functional as F
+
+plt.figure(figsize=(10, 7))
+
+y_score_rf_no_pca = best_rf_no_pca.predict_proba(X_test_scaled)[:, 1]
+fpr_rf_no_pca, tpr_rf_no_pca, _ = roc_curve(y_test, y_score_rf_no_pca, pos_label=1)
+auc_rf_no_pca = auc(fpr_rf_no_pca, tpr_rf_no_pca)
+plt.plot(fpr_rf_no_pca, tpr_rf_no_pca, label=f'RF (No PCA), AUC={auc_rf_no_pca:.2f}')
+
+y_score_rf_pca = best_rf_pca.predict_proba(X_test_pca)[:, 1]
+fpr_rf_pca, tpr_rf_pca, _ = roc_curve(y_test, y_score_rf_pca, pos_label=1)
+auc_rf_pca = auc(fpr_rf_pca, tpr_rf_pca)
+plt.plot(fpr_rf_pca, tpr_rf_pca, label=f'RF (PCA), AUC={auc_rf_pca:.2f}')
